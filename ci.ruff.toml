@@ -1,0 +1,6 @@
+# This is the Ruff config used in CI.
+# In development, ruff.toml is used instead.
+
+target-version = 'py38'
+[lint]
+exclude = ["ants-platform/api/**/*.py"]

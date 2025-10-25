@@ -1,0 +1,109 @@
+[tool.poetry]
+name = "ants-platform"
+
+version = "3.3.8"
+description = "A client library for accessing ants-platform"
+authors = ["ants-platform <developers@ants-platform.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.9,<4.0"
+httpx = ">=0.15.4,<1.0"
+pydantic = ">=1.10.7, <3.0"
+backoff = ">=1.10.0"
+openai = { version = ">=0.27.8", optional = true }
+wrapt = "^1.14"
+langchain = { version = ">=0.0.309", optional = true }
+packaging = ">=23.2,<26.0"
+requests = "^2"
+opentelemetry-api = "^1.33.1"
+opentelemetry-sdk = "^1.33.1"
+opentelemetry-exporter-otlp-proto-http = "^1.33.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.4,<9.0"
+pytest-timeout = "^2.1.0"
+pytest-xdist = "^3.3.1"
+pre-commit = "^3.2.2"
+pytest-asyncio = ">=0.21.1,<1.2.0"
+pytest-httpserver = "^1.0.8"
+ruff = ">=0.1.8,<0.13.0"
+mypy = "^1.0.0"
+langchain-openai = ">=0.0.5,<0.4"
+langgraph = ">=0.2.62,<0.7.0"
+
+[tool.poetry.group.docs.dependencies]
+pdoc = "^15.0.4"
+
+[tool.poetry.extras]
+openai = ["openai"]
+langchain = ["langchain"]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+log_cli = true
+
+[tool.poetry_bumpversion.file."ants_platform/version.py"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+
+# Performance optimizations for CI
+cache_dir = ".mypy_cache"
+sqlite_cache = true
+incremental = true
+show_column_numbers = true
+
+[[tool.mypy.overrides]]
+module = [
+    "langchain.*",
+    "openai.*",
+    "chromadb.*",
+    "tiktoken.*",
+    "google.*",
+    "anthropic.*",
+    "cohere.*",
+    "dashscope.*",
+    "pymongo.*",
+    "bson.*",
+    "boto3.*",
+    "llama_index.*",
+    "respx.*",
+    "bs4.*",
+    "lark.*",
+    "huggingface_hub.*",
+    "backoff.*",
+    "wrapt.*",
+    "packaging.*",
+    "requests.*",
+    "opentelemetry.*"
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "ants_platform.api.resources.*",
+    "ants_platform.api.core.*",
+    "ants_platform.api.client"
+]
+ignore_errors = true
+
+[tool.poetry.scripts]
+release = "scripts.release:main"
