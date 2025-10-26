@@ -1,4 +1,6 @@
-![Ants Platform GitHub Banner](static/Ants_Platform_Blended.png)
+<div align="center">
+   <img src="./static/logo.png" alt="ANTS Platform GitHub Banner">
+</div>
 
 # Ants Platform Python SDK
 
@@ -16,4 +18,4 @@ pip install ants-platform
 
 ## Docs
 
-Please see our docs for detailed information on this SDK.
+Please see our [docs](https://agenticants.ai/docs) for detailed information on this SDK.
