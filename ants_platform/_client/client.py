@@ -251,6 +251,10 @@ class AntsPlatform:
                 "OTEL_SDK_DISABLED is set. AntsPlatform tracing will be disabled and no traces will appear in the UI."
             )
 
+        # Store credentials for API calls
+        self._public_key = public_key
+        self._secret_key = secret_key
+
         # Initialize api and tracer if requirements are met
         self._resources = LangfuseResourceManager(
             public_key=public_key,
@@ -289,6 +293,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> AntsPlatformSpan:
@@ -306,6 +312,7 @@ class AntsPlatform:
             output: Output data from the operation (can be any JSON-serializable object)
             metadata: Additional metadata to associate with the span
             version: Version identifier for the code or component
+            agent_name: Human-readable agent name (allows UTF-8). Backend auto-generates agent_id.
             level: Importance level of the span (info, warning, error)
             status_message: Optional status message for the span
 
@@ -314,7 +321,10 @@ class AntsPlatform:
 
         Example:
             ```python
-            span = ants_platform.start_span(name="process-data")
+            span = ants_platform.start_span(
+                name="process-data",
+                agent_name="DataProcessor"
+            )
             try:
                 # Do work
                 span.update(output="result")
@@ -330,6 +340,8 @@ class AntsPlatform:
             output=output,
             metadata=metadata,
             version=version,
+            agent_name=agent_name,
+                            agent_display_name=agent_display_name,
             level=level,
             status_message=status_message,
         )
@@ -343,6 +355,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         end_on_exit: Optional[bool] = None,
@@ -362,6 +376,8 @@ class AntsPlatform:
             output: Output data from the operation (can be any JSON-serializable object)
             metadata: Additional metadata to associate with the span
             version: Version identifier for the code or component
+            agent_name: Human-readable agent name (allows UTF-8). Backend auto-generates agent_id.
+            agent_display_name: Optional mutable display name for UI (defaults to agent_name if not provided)
             level: Importance level of the span (info, warning, error)
             status_message: Optional status message for the span
             end_on_exit (default: True): Whether to end the span automatically when leaving the context manager. If False, the span must be manually ended to avoid memory leaks.
@@ -371,14 +387,20 @@ class AntsPlatform:
 
         Example:
             ```python
-            with ants_platform.start_as_current_span(name="process-query") as span:
+            with ants_platform.start_as_current_span(
+                name="process-query",
+                agent_name="QueryOrchestrator"
+            ) as span:
                 # Do work
                 result = process_data()
                 span.update(output=result)
 
-                # Create a child span automatically
-                with span.start_as_current_span(name="sub-operation") as child_span:
-                    # Do sub-operation work
+                # Child automatically inherits agent context
+                with span.start_as_current_observation(
+                    name="sub-operation",
+                    as_type="span"
+                ) as child_span:
+                    # This inherits agent_name="QueryOrchestrator"
                     child_span.update(output="sub-result")
             ```
         """
@@ -390,6 +412,8 @@ class AntsPlatform:
             output=output,
             metadata=metadata,
             version=version,
+            agent_name=agent_name,
+            agent_display_name=agent_display_name,
             level=level,
             status_message=status_message,
             end_on_exit=end_on_exit,
@@ -406,6 +430,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -427,6 +453,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> AntsPlatformSpan: ...
@@ -442,6 +470,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> AntsPlatformAgent: ...
@@ -457,6 +487,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> AntsPlatformTool: ...
@@ -472,6 +504,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> AntsPlatformChain: ...
@@ -487,6 +521,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> AntsPlatformRetriever: ...
@@ -502,6 +538,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> AntsPlatformEvaluator: ...
@@ -517,6 +555,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -538,6 +578,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> AntsPlatformGuardrail: ...
@@ -552,6 +594,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -584,6 +628,7 @@ class AntsPlatform:
             output: Output data from the operation
             metadata: Additional metadata to associate with the observation
             version: Version identifier for the code or component
+            agent_name: Human-readable name for the agent executing this observation
             level: Importance level of the observation
             status_message: Optional status message for the observation
             completion_start_time: When the model started generating (for generation types)
@@ -618,6 +663,8 @@ class AntsPlatform:
                         output=output,
                         metadata=metadata,
                         version=version,
+                                agent_name=agent_name,
+                            agent_display_name=agent_display_name,
                         level=level,
                         status_message=status_message,
                         completion_start_time=completion_start_time,
@@ -637,6 +684,8 @@ class AntsPlatform:
             output=output,
             metadata=metadata,
             version=version,
+            agent_name=agent_name,
+                            agent_display_name=agent_display_name,
             level=level,
             status_message=status_message,
             completion_start_time=completion_start_time,
@@ -656,6 +705,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -688,6 +739,8 @@ class AntsPlatform:
                 output=output,
                 metadata=metadata,
                 version=version,
+                agent_name=agent_name,
+                            agent_display_name=agent_display_name,
                 level=level,
                 status_message=status_message,
                 completion_start_time=completion_start_time,
@@ -710,6 +763,8 @@ class AntsPlatform:
                 output=output,
                 metadata=metadata,
                 version=version,
+                agent_name=agent_name,
+                            agent_display_name=agent_display_name,
                 level=level,
                 status_message=status_message,
             )
@@ -918,6 +973,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -940,6 +997,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         end_on_exit: Optional[bool] = None,
@@ -956,6 +1015,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         end_on_exit: Optional[bool] = None,
@@ -972,6 +1033,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         end_on_exit: Optional[bool] = None,
@@ -988,6 +1051,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         end_on_exit: Optional[bool] = None,
@@ -1004,6 +1069,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         end_on_exit: Optional[bool] = None,
@@ -1020,6 +1087,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         end_on_exit: Optional[bool] = None,
@@ -1036,6 +1105,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -1058,6 +1129,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         end_on_exit: Optional[bool] = None,
@@ -1073,6 +1146,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -1109,6 +1184,7 @@ class AntsPlatform:
             output: Output data from the operation (can be any JSON-serializable object)
             metadata: Additional metadata to associate with the observation
             version: Version identifier for the code or component
+            agent_name: Human-readable name for the agent executing this observation
             level: Importance level of the observation (info, warning, error)
             status_message: Optional status message for the observation
             end_on_exit (default: True): Whether to end the span automatically when leaving the context manager. If False, the span must be manually ended to avoid memory leaks.
@@ -1179,6 +1255,8 @@ class AntsPlatform:
                             output=output,
                             metadata=metadata,
                             version=version,
+                                        agent_name=agent_name,
+                            agent_display_name=agent_display_name,
                             level=level,
                             status_message=status_message,
                             completion_start_time=completion_start_time,
@@ -1203,6 +1281,8 @@ class AntsPlatform:
                     output=output,
                     metadata=metadata,
                     version=version,
+                        agent_name=agent_name,
+                            agent_display_name=agent_display_name,
                     level=level,
                     status_message=status_message,
                     completion_start_time=completion_start_time,
@@ -1244,6 +1324,8 @@ class AntsPlatform:
                             output=output,
                             metadata=metadata,
                             version=version,
+                                        agent_name=agent_name,
+                            agent_display_name=agent_display_name,
                             level=level,
                             status_message=status_message,
                         ),
@@ -1267,6 +1349,8 @@ class AntsPlatform:
                     output=output,
                     metadata=metadata,
                     version=version,
+                        agent_name=agent_name,
+                            agent_display_name=agent_display_name,
                     level=level,
                     status_message=status_message,
                 ),
@@ -1284,6 +1368,8 @@ class AntsPlatform:
             output=output,
             metadata=metadata,
             version=version,
+            agent_name=agent_name,
+                            agent_display_name=agent_display_name,
             level=level,
             status_message=status_message,
         )
@@ -1342,6 +1428,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -1362,6 +1450,8 @@ class AntsPlatform:
                 output=output,
                 metadata=metadata,
                 version=version,
+                agent_name=agent_name,
+                            agent_display_name=agent_display_name,
                 level=level,
                 status_message=status_message,
                 completion_start_time=completion_start_time,
@@ -1389,6 +1479,8 @@ class AntsPlatform:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -1413,6 +1505,8 @@ class AntsPlatform:
                 "output": output,
                 "metadata": metadata,
                 "version": version,
+                "agent_name": agent_name,
+                "agent_display_name": agent_display_name,
                 "level": level,
                 "status_message": status_message,
             }
@@ -1608,6 +1702,7 @@ class AntsPlatform:
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
         input: Optional[Any] = None,
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
@@ -1625,6 +1720,7 @@ class AntsPlatform:
             user_id: ID of the user who initiated the AntsPlatform trace
             session_id: Session identifier for grouping related AntsPlatform traces
             version: Version identifier for the application or service
+            agent_name: Human-readable name for the agent executing this trace
             input: Input data for the overall AntsPlatform trace
             output: Output data from the overall AntsPlatform trace
             metadata: Additional metadata to associate with the AntsPlatform trace
@@ -1676,6 +1772,7 @@ class AntsPlatform:
                 user_id=user_id,
                 session_id=session_id,
                 version=version,
+                agent_name=agent_name,
                 input=input,
                 output=output,
                 metadata=metadata,
@@ -2996,6 +3093,146 @@ class AntsPlatform:
         # we need add safe="" to force escaping of slashes
         # This is necessary for prompts in prompt folders
         return urllib.parse.quote(url, safe="")
+
+    def update_agent_display_name(
+        self, agent_name: str, new_display_name: str
+    ) -> Dict[str, Any]:
+        """Update the display name for an existing agent.
+
+        This method allows you to change the user-facing display name for an agent
+        without affecting the immutable agent_name identifier or agent_id.
+
+        The agent_name is immutable and used for generating the agent_id (via BLAKE2b-64 hash).
+        The display name is mutable and stored separately for UI purposes.
+
+        Args:
+            agent_name: The immutable agent identifier (used to generate agent_id)
+            new_display_name: The new display name to set
+
+        Returns:
+            Dict with keys:
+                - success (bool): Whether the update succeeded
+                - agentId (str): The 16-character hex agent ID
+                - displayName (str): The updated display name
+                - updatedAt (str): ISO timestamp of the update
+
+        Raises:
+            ValueError: If agent_name or new_display_name is empty
+            httpx.HTTPStatusError: If the API request fails (401, 404, 500, etc.)
+
+        Example:
+            ```python
+            from ants_platform import AntsPlatform
+
+            client = AntsPlatform(
+                public_key="pk_...",
+                secret_key="sk_..."
+            )
+
+            # Update display name for an agent
+            result = client.update_agent_display_name(
+                agent_name="qa_agent",
+                new_display_name="QA Agent v3.0"
+            )
+
+            print(f"Updated agent {result['agentId']}")
+            print(f"New display name: {result['displayName']}")
+            ```
+
+        Note:
+            The display name is separate from agent_name:
+            - agent_name: Immutable identifier, never changes
+            - agent_display_name: Mutable UI label, can be updated
+            - agent_id: Generated from agent_name, never changes
+        """
+        from ants_platform._client.attributes import generate_agent_id, validate_and_normalize_agent_name
+
+        # Validate inputs
+        if not agent_name or not agent_name.strip():
+            raise ValueError("agent_name cannot be empty")
+
+        if not new_display_name or not new_display_name.strip():
+            raise ValueError("new_display_name cannot be empty")
+
+        # Normalize agent_name to lowercase (same as during agent creation)
+        normalized_agent_name = validate_and_normalize_agent_name(agent_name)
+        if not normalized_agent_name:
+            raise ValueError("agent_name cannot be empty after normalization")
+
+        # Generate agent_id from normalized agent_name and project_id
+        project_id = self._get_project_id()
+        if not project_id:
+            raise ValueError(
+                "Unable to update agent display name: project_id not available. "
+                "Ensure the SDK is properly authenticated and can access project information."
+            )
+
+        agent_id = generate_agent_id(normalized_agent_name, project_id)
+
+        # Build the API endpoint URL
+        url = f"{self._host}/api/public/agents/{agent_id}/display-name"
+
+        # Make PATCH request using httpx
+        if self._resources is None:
+            raise Error(
+                "SDK is not correctly initialized. Check the init logs for more details."
+            )
+
+        # Prepare auth header (Basic auth with Base64 encoding)
+        import base64
+
+        credentials = f"{self._public_key}:{self._secret_key}"
+        encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode(
+            "utf-8"
+        )
+        auth_header = f"Basic {encoded_credentials}"
+        headers = {
+            "Authorization": auth_header,
+            "Content-Type": "application/json",
+        }
+
+        body = {"displayName": new_display_name.strip()}
+
+        try:
+            # Make PATCH request with httpx (use 30s timeout)
+            with httpx.Client(timeout=30.0) as client:
+                response = client.patch(url, headers=headers, json=body)
+                response.raise_for_status()
+
+                result = response.json()
+                ants_platform_logger.info(
+                    f"Updated display name for agent {agent_id} to '{new_display_name}'"
+                )
+                return result
+
+        except httpx.HTTPStatusError as e:
+            ants_platform_logger.error(
+                f"Failed to update agent display name: {e.response.status_code} - {e.response.text}"
+            )
+            raise
+        except httpx.TimeoutException as e:
+            ants_platform_logger.error(
+                f"Timeout while updating agent display name for {agent_id}"
+            )
+            raise ValueError(
+                f"Request timeout: Unable to update agent display name. "
+                f"Please check your network connection and try again."
+            ) from e
+        except httpx.ConnectError as e:
+            ants_platform_logger.error(
+                f"Connection error while updating agent display name: {e}"
+            )
+            raise ValueError(
+                f"Connection error: Unable to connect to {self._host}. "
+                f"Please verify the host URL and network connection."
+            ) from e
+        except Exception as e:
+            ants_platform_logger.error(
+                f"Unexpected error updating agent display name: {e}"
+            )
+            raise RuntimeError(
+                f"Unexpected error while updating agent display name: {str(e)}"
+            ) from e
 
     def clear_prompt_cache(self) -> None:
         """Clear the entire prompt cache, removing all cached prompts.

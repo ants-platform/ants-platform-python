@@ -84,6 +84,8 @@ class AntsPlatformObservationWrapper:
         metadata: Optional[Any] = None,
         environment: Optional[str] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -104,6 +106,7 @@ class AntsPlatformObservationWrapper:
             metadata: Additional metadata to associate with the span
             environment: The tracing environment
             version: Version identifier for the code or component
+            agent_name: Human-readable agent name (allows UTF-8)
             level: Importance level of the span (info, warning, error)
             status_message: Optional status message for the span
             completion_start_time: When the model started generating the response
@@ -129,6 +132,35 @@ class AntsPlatformObservationWrapper:
                 AntsPlatformOtelSpanAttributes.ENVIRONMENT, self._environment
             )
 
+        # Resolve agent context (validate, inherit from parent, generate agent_id if needed)
+        agent_name, agent_id = self._resolve_agent_context(
+            as_type=as_type,
+            name=otel_span.name if hasattr(otel_span, "name") else None,
+            agent_name=agent_name,
+        )
+
+        # Inherit agent_display_name from parent if not explicitly provided
+        if agent_display_name is None:
+            agent_display_name = self._get_parent_agent_display_name()
+
+        # Store agent context for use in child observations and context propagation
+        self._agent_name = agent_name
+        self._agent_id = agent_id
+        self._agent_display_name = agent_display_name
+
+        # Require agent_name for Ants Platform agent tracking
+        if not agent_name:
+            raise ValueError(
+                "agent_name is required for Ants Platform agent tracking. "
+                "Please provide the 'agent_name' parameter when creating spans. "
+                "Example: client.start_as_current_span(name='task', agent_name='my_agent'). "
+                "The SDK will automatically generate a stable agent_id for tracking. "
+                "See https://agenticants.ai/docs for details."
+            )
+
+        # Set agent context in OTEL baggage for child span inheritance
+        self._set_agent_context_for_children()
+
         # Handle media only if span is sampled
         if self._otel_span.is_recording():
             media_processed_input = self._process_media_and_apply_mask(
@@ -149,6 +181,9 @@ class AntsPlatformObservationWrapper:
                     output=media_processed_output,
                     metadata=media_processed_metadata,
                     version=version,
+                    agent_name=agent_name,
+                    agent_display_name=agent_display_name,
+                    agent_id=agent_id,
                     level=level,
                     status_message=status_message,
                     completion_start_time=completion_start_time,
@@ -170,6 +205,9 @@ class AntsPlatformObservationWrapper:
                     output=media_processed_output,
                     metadata=media_processed_metadata,
                     version=version,
+                    agent_name=agent_name,
+                    agent_display_name=agent_display_name,
+                    agent_id=agent_id,
                     level=level,
                     status_message=status_message,
                     observation_type=cast(
@@ -209,6 +247,8 @@ class AntsPlatformObservationWrapper:
         name: Optional[str] = None,
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         version: Optional[str] = None,
         input: Optional[Any] = None,
         output: Optional[Any] = None,
@@ -220,12 +260,14 @@ class AntsPlatformObservationWrapper:
 
         This method updates trace-level attributes of the trace that this span
         belongs to. This is useful for adding or modifying trace-wide information
-        like user ID, session ID, or tags.
+        like user ID, session ID, agent context, or tags.
 
         Args:
             name: Updated name for the trace
             user_id: ID of the user who initiated the trace
             session_id: Session identifier for grouping related traces
+            agent_name: Immutable agent identifier (used for agent_id generation)
+            agent_display_name: Optional mutable display name for UI
             version: Version identifier for the application or service
             input: Input data for the overall trace
             output: Output data from the overall trace
@@ -246,10 +288,35 @@ class AntsPlatformObservationWrapper:
             data=metadata, field="metadata", span=self._otel_span
         )
 
+        # Generate agent_id if agent_name is provided
+        agent_id = None
+        project_id = None
+        if agent_name:
+            # Normalize agent_name to lowercase before generating agent_id
+            from ants_platform._client.attributes import generate_agent_id, validate_and_normalize_agent_name
+            agent_name = validate_and_normalize_agent_name(agent_name)
+            if not agent_name:
+                raise ValueError("agent_name cannot be empty after normalization")
+
+            project_id = self._ants_platform_client._get_project_id()
+            if not project_id:
+                raise ValueError(
+                    "Unable to generate agent_id for trace update: project_id not available. "
+                    "Ensure the SDK is properly authenticated and can access project information."
+                )
+            agent_id = generate_agent_id(agent_name, project_id)
+            ants_platform_logger.info(
+                f"[AGENT_ID] Generated for trace update: agent_id={agent_id}, agent_name={agent_name}, project_id={project_id}"
+            )
+
         attributes = create_trace_attributes(
             name=name,
             user_id=user_id,
             session_id=session_id,
+            agent_name=agent_name,
+            agent_display_name=agent_display_name,
+            agent_id=agent_id,
+            project_id=project_id,
             version=version,
             input=media_processed_input,
             output=media_processed_output,
@@ -540,6 +607,151 @@ class AntsPlatformObservationWrapper:
 
         return data
 
+    def _resolve_agent_context(
+        self,
+        *,
+        as_type: ObservationTypeLiteral,
+        name: Optional[str],
+        agent_name: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Resolve agent_name and agent_id with inheritance from parent.
+
+        SDK generates agent_id client-side using BLAKE2b-128 hash of agent_name.
+        This ensures stable, deterministic agent IDs that allow backend to track
+        agents efficiently while supporting user-friendly display name changes.
+
+        Child spans ALWAYS inherit parent's agent_name/agent_id to prevent agent override.
+        If a parent has an agent_name, child cannot change it - this ensures
+        consistent agent attribution throughout the entire trace tree.
+
+        Returns:
+            tuple[Optional[str], Optional[str]]: (agent_name, agent_id)
+        """
+        from ants_platform._client.attributes import generate_agent_id
+
+        # Get parent agent context from baggage
+        parent_agent_name = self._get_parent_agent_name()
+        parent_agent_id = self._get_parent_agent_id()
+
+        # If parent has agent_name, child MUST inherit it (no override allowed)
+        if parent_agent_name is not None:
+            if agent_name is not None and agent_name != parent_agent_name:
+                # Warn user that child cannot override parent agent_name
+                ants_platform_logger.warning(
+                    f"Child span attempted to override parent agent_name "
+                    f"(parent: '{parent_agent_name}', child: '{agent_name}'). "
+                    f"Using parent agent_name to maintain consistent attribution."
+                )
+            return parent_agent_name, parent_agent_id
+
+        # If no parent agent_name, use the provided one and generate agent_id
+        if agent_name:
+            # Normalize agent_name to lowercase before generating agent_id
+            from ants_platform._client.attributes import validate_and_normalize_agent_name
+            agent_name = validate_and_normalize_agent_name(agent_name)
+            if not agent_name:
+                raise ValueError("agent_name cannot be empty after normalization")
+
+            # Get project_id from client for agent_id generation
+            project_id = self._ants_platform_client._get_project_id()
+            if not project_id:
+                raise ValueError(
+                    "Unable to generate agent_id: project_id not available. "
+                    "Ensure the SDK is properly authenticated and can access project information."
+                )
+
+            agent_id = generate_agent_id(agent_name, project_id)
+            ants_platform_logger.info(
+                f"[AGENT_ID] Resolved for span: agent_id={agent_id}, agent_name={agent_name}, project_id={project_id}"
+            )
+            return agent_name, agent_id
+
+        return None, None
+
+    def _get_parent_agent_name(self) -> Optional[str]:
+        """Get agent_name from parent span via OTEL baggage.
+
+        This method retrieves the agent_name from the parent span's context using
+        OpenTelemetry's baggage mechanism.
+
+        Returns:
+            Optional[str]: The parent's agent_name, or None if not set
+
+        Note:
+            Uses OTEL baggage for standard-compliant context propagation.
+        """
+        try:
+            from opentelemetry import baggage
+
+            return baggage.get_baggage("agent_name")
+        except Exception:
+            # Silently fail if baggage is not available
+            return None
+
+    def _get_parent_agent_id(self) -> Optional[str]:
+        """Get agent_id from parent span via OTEL baggage.
+
+        This method retrieves the agent_id from the parent span's context using
+        OpenTelemetry's baggage mechanism.
+
+        Returns:
+            Optional[str]: The parent's agent_id, or None if not set
+
+        Note:
+            Uses OTEL baggage for standard-compliant context propagation.
+        """
+        try:
+            from opentelemetry import baggage
+
+            return baggage.get_baggage("agent_id")
+        except Exception:
+            # Silently fail if baggage is not available
+            return None
+
+    def _get_parent_agent_display_name(self) -> Optional[str]:
+        """Get agent_display_name from parent span via OTEL baggage.
+
+        This method retrieves the agent_display_name from the parent span's context using
+        OpenTelemetry's baggage mechanism.
+
+        Returns:
+            Optional[str]: The parent's agent_display_name, or None if not set
+
+        Note:
+            Uses OTEL baggage for standard-compliant context propagation.
+        """
+        try:
+            from opentelemetry import baggage
+
+            return baggage.get_baggage("agent_display_name")
+        except Exception:
+            # Silently fail if baggage is not available
+            return None
+
+    def _set_agent_context_for_children(self) -> None:
+        """Set agent_name, agent_id, and agent_display_name in OTEL baggage for child span inheritance."""
+        if self._agent_name:
+            try:
+                from opentelemetry import baggage, context
+                current_context = context.get_current()
+                current_context = baggage.set_baggage(
+                    "agent_name", self._agent_name, current_context
+                )
+                if self._agent_id:
+                    current_context = baggage.set_baggage(
+                        "agent_id", self._agent_id, current_context
+                    )
+                if self._agent_display_name:
+                    current_context = baggage.set_baggage(
+                        "agent_display_name", self._agent_display_name, current_context
+                    )
+                context.attach(current_context)
+            except Exception as e:
+                # Log but don't fail if baggage setting fails
+                ants_platform_logger.warning(
+                    f"Failed to set agent context in OTEL baggage: {e}"
+                )
+
     def update(
         self,
         *,
@@ -556,12 +768,22 @@ class AntsPlatformObservationWrapper:
         usage_details: Optional[Dict[str, int]] = None,
         cost_details: Optional[Dict[str, float]] = None,
         prompt: Optional[PromptClient] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         **kwargs: Any,
     ) -> "AntsPlatformObservationWrapper":
         """Update this observation with new information.
 
         This method updates the observation with new information that becomes available
         during execution, such as outputs, metadata, or status changes.
+
+        Note:
+            agent_name is IMMUTABLE after observation creation.
+            Attempting to change it will raise an error. To track work under
+            a different agent, create a new child observation instead.
+
+            agent_display_name is MUTABLE and can be updated to change the UI display
+            name without affecting the agent's stable identity (agent_id).
 
         Args:
             name: Observation name
@@ -577,8 +799,25 @@ class AntsPlatformObservationWrapper:
             usage_details: Token or other usage statistics (for generation types)
             cost_details: Cost breakdown for the operation (for generation types)
             prompt: Reference to the prompt used (for generation types)
+            agent_name: Agent name (IMMUTABLE - will raise error if provided)
+            agent_display_name: Optional mutable display name for UI (can be updated)
             **kwargs: Additional keyword arguments (ignored)
+
+        Raises:
+            ValueError: If attempting to change agent_name after creation.
+
+        Returns:
+            AntsPlatformObservationWrapper: Self for method chaining.
         """
+        # Enforce agent context immutability
+        if agent_name is not None:
+            raise ValueError(
+                "agent_name is immutable after observation creation. "
+                "To track work under a different agent, create a new child observation "
+                "using start_observation() or start_as_current_observation() with the "
+                "desired agent_name."
+            )
+
         if not self._otel_span.is_recording():
             return self
 
@@ -615,6 +854,7 @@ class AntsPlatformObservationWrapper:
                 usage_details=usage_details,
                 cost_details=cost_details,
                 prompt=prompt,
+                agent_display_name=agent_display_name,
             )
         else:
             # For span-like types and events
@@ -633,6 +873,7 @@ class AntsPlatformObservationWrapper:
                     or self._observation_type == "event"
                     else None,
                 ),
+                agent_display_name=agent_display_name,
             )
 
         self._otel_span.set_attributes(attributes=attributes)
@@ -800,6 +1041,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -833,6 +1076,7 @@ class AntsPlatformObservationWrapper:
             output: Output data from the operation
             metadata: Additional metadata to associate with the observation
             version: Version identifier for the code or component
+            agent_name: Human-readable agent name (overrides parent if provided)
             level: Importance level of the observation (info, warning, error)
             status_message: Optional status message for the observation
             completion_start_time: When the model started generating (for generation types)
@@ -883,6 +1127,7 @@ class AntsPlatformObservationWrapper:
             "output": output,
             "metadata": metadata,
             "version": version,
+            "agent_name": agent_name,
             "level": level,
             "status_message": status_message,
         }
@@ -911,6 +1156,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> _AgnosticContextManager["AntsPlatformSpan"]: ...
@@ -925,6 +1172,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -945,6 +1194,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -965,6 +1216,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> _AgnosticContextManager["AntsPlatformAgent"]: ...
@@ -979,6 +1232,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> _AgnosticContextManager["AntsPlatformTool"]: ...
@@ -993,6 +1248,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> _AgnosticContextManager["AntsPlatformChain"]: ...
@@ -1007,6 +1264,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> _AgnosticContextManager["AntsPlatformRetriever"]: ...
@@ -1021,6 +1280,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> _AgnosticContextManager["AntsPlatformEvaluator"]: ...
@@ -1035,6 +1296,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> _AgnosticContextManager["AntsPlatformGuardrail"]: ...
@@ -1048,6 +1311,8 @@ class AntsPlatformObservationWrapper:
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -1082,6 +1347,7 @@ class AntsPlatformObservationWrapper:
             output: Output data from the operation
             metadata: Additional metadata to associate with the observation
             version: Version identifier for the code or component
+            agent_name: Human-readable agent name (overrides parent if provided)
             level: Importance level of the observation (info, warning, error)
             status_message: Optional status message for the observation
             completion_start_time: When the model started generating (for generation types)
@@ -1103,6 +1369,7 @@ class AntsPlatformObservationWrapper:
             output=output,
             metadata=metadata,
             version=version,
+            agent_name=agent_name,
             level=level,
             status_message=status_message,
             completion_start_time=completion_start_time,
@@ -1134,6 +1401,8 @@ class AntsPlatformSpan(AntsPlatformObservationWrapper):
         metadata: Optional[Any] = None,
         environment: Optional[str] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ):
@@ -1147,6 +1416,7 @@ class AntsPlatformSpan(AntsPlatformObservationWrapper):
             metadata: Additional metadata to associate with the span
             environment: The tracing environment
             version: Version identifier for the code or component
+            agent_name: Human-readable agent name (allows UTF-8)
             level: Importance level of the span (info, warning, error)
             status_message: Optional status message for the span
         """
@@ -1154,6 +1424,8 @@ class AntsPlatformSpan(AntsPlatformObservationWrapper):
             otel_span=otel_span,
             as_type="span",
             ants_platform_client=ants_platform_client,
+            agent_name=agent_name,
+            agent_display_name=agent_display_name,
             input=input,
             output=output,
             metadata=metadata,
@@ -1230,6 +1502,8 @@ class AntsPlatformSpan(AntsPlatformObservationWrapper):
         output: Optional[Any] = None,
         metadata: Optional[Any] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
     ) -> _AgnosticContextManager["AntsPlatformSpan"]:
@@ -1248,6 +1522,7 @@ class AntsPlatformSpan(AntsPlatformObservationWrapper):
             output: Output data from the operation
             metadata: Additional metadata to associate with the span
             version: Version identifier for the code or component
+            agent_name: Human-readable agent name (allows UTF-8)
             level: Importance level of the span (info, warning, error)
             status_message: Optional status message for the span
 
@@ -1283,6 +1558,7 @@ class AntsPlatformSpan(AntsPlatformObservationWrapper):
             output=output,
             metadata=metadata,
             version=version,
+            agent_name=agent_name,
             level=level,
             status_message=status_message,
         )
@@ -1553,6 +1829,8 @@ class AntsPlatformGeneration(AntsPlatformObservationWrapper):
         metadata: Optional[Any] = None,
         environment: Optional[str] = None,
         version: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_display_name: Optional[str] = None,
         level: Optional[SpanLevel] = None,
         status_message: Optional[str] = None,
         completion_start_time: Optional[datetime] = None,
@@ -1572,6 +1850,7 @@ class AntsPlatformGeneration(AntsPlatformObservationWrapper):
             metadata: Additional metadata to associate with the generation
             environment: The tracing environment
             version: Version identifier for the model or component
+            agent_name: Human-readable agent name (allows UTF-8)
             level: Importance level of the generation (info, warning, error)
             status_message: Optional status message for the generation
             completion_start_time: When the model started generating the response
@@ -1590,6 +1869,8 @@ class AntsPlatformGeneration(AntsPlatformObservationWrapper):
             metadata=metadata,
             environment=environment,
             version=version,
+            agent_name=agent_name,
+            agent_display_name=agent_display_name,
             level=level,
             status_message=status_message,
             completion_start_time=completion_start_time,
@@ -1639,6 +1920,8 @@ class AntsPlatformEvent(AntsPlatformObservationWrapper):
             metadata=metadata,
             environment=environment,
             version=version,
+            agent_name=None,
+            agent_display_name=None,
             level=level,
             status_message=status_message,
         )
@@ -1659,11 +1942,15 @@ class AntsPlatformEvent(AntsPlatformObservationWrapper):
         usage_details: Optional[Dict[str, int]] = None,
         cost_details: Optional[Dict[str, float]] = None,
         prompt: Optional[PromptClient] = None,
+        agent_name: Optional[str] = None,
         **kwargs: Any,
     ) -> "AntsPlatformEvent":
         """Update is not allowed for AntsPlatformEvent because events cannot be updated.
 
         This method logs a warning and returns self without making changes.
+
+        Note:
+            Events are immutable and cannot be updated after creation.
 
         Returns:
             self: Returns the unchanged AntsPlatformEvent instance

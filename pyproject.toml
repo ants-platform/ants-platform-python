@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "ants-platform"
 
-version = "3.3.8"
+version = "3.4.0"
 description = "A client library for accessing ants-platform"
 authors = ["ants-platform <developers@ants-platform.com>"]
 license = "MIT"

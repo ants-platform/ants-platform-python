@@ -94,6 +94,10 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
         self.prompt_to_parent_run_map: Dict[UUID, Any] = {}
         self.updated_completion_start_time_memo: Set[UUID] = set()
 
+        # Stack for tracking nested agent contexts (agent_name only)
+        # Used to properly attribute LLM calls in multi-agent workflows
+        self._agent_stack: List[typing.Tuple[Optional[str], Optional[str]]] = []
+
         self.last_trace_id: Optional[str] = None
         self.update_trace = update_trace
 
@@ -243,10 +247,56 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
         ):
             attributes["user_id"] = metadata["ants_platform_user_id"]
 
-        if "ants_platform_tags" in metadata and isinstance(metadata["ants_platform_tags"], list):
+        if "ants_platform_tags" in metadata and isinstance(
+            metadata["ants_platform_tags"], list
+        ):
             attributes["tags"] = [str(tag) for tag in metadata["ants_platform_tags"]]
 
+        if "ants_platform_agent_name" in metadata and isinstance(
+            metadata["ants_platform_agent_name"], str
+        ):
+            attributes["agent_name"] = metadata["ants_platform_agent_name"]
+
         return attributes
+
+    def _extract_agent_context_from_metadata(
+        self, metadata: Optional[Dict[str, Any]]
+    ) -> Dict[str, Optional[str]]:
+        """Extract agent_name from LangChain metadata.
+
+        Backend generates agent_id, so SDK only extracts agent_name.
+
+        Priority:
+        1. Explicit metadata (ants_platform_agent_name)
+        2. Stack inheritance (nested agents)
+
+        Returns:
+            Dictionary with agent_name key
+        """
+        agent_context = {"agent_name": None}
+
+        if metadata is None:
+            return agent_context
+
+        # Extract from explicit metadata
+        if "ants_platform_agent_name" in metadata and isinstance(
+            metadata["ants_platform_agent_name"], str
+        ):
+            agent_context["agent_name"] = metadata["ants_platform_agent_name"]
+
+        # Inherit from stack if not provided
+        if agent_context["agent_name"] is None and self._agent_stack:
+            stack_context = self._get_current_agent_context()
+            agent_context["agent_name"] = stack_context["agent_name"]
+
+        return agent_context
+
+    def _get_current_agent_context(self) -> Dict[str, Optional[str]]:
+        """Get current agent context from stack (only agent_name)."""
+        if self._agent_stack:
+            agent_name = self._agent_stack[-1]  # Stack stores agent_name directly
+            return {"agent_name": agent_name}
+        return {"agent_name": None}
 
     def on_chain_start(
         self,
@@ -275,6 +325,11 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
                 serialized, "chain", **kwargs
             )
 
+            # Extract agent context for agent-type observations
+            agent_context = self._extract_agent_context_from_metadata(
+                metadata, observation_type, span_name
+            )
+
             span = self._get_parent_observation(parent_run_id).start_observation(
                 name=span_name,
                 as_type=observation_type,
@@ -284,6 +339,7 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
                     Optional[Literal["DEBUG", "DEFAULT", "WARNING", "ERROR"]],
                     span_level,
                 ),
+                agent_name=agent_context["agent_name"],
             )
             self._attach_observation(run_id, span)
 
@@ -301,7 +357,9 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
                         if self.update_trace
                         else {}
                     ),
-                    **self._parse_ants_platform_trace_attributes_from_metadata(metadata),
+                    **self._parse_ants_platform_trace_attributes_from_metadata(
+                        metadata
+                    ),
                 )
 
             self.last_trace_id = self.runs[run_id].trace_id
@@ -421,7 +479,11 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Run on agent action."""
+        """Run on agent action.
+
+        Pushes agent context onto the stack so that child observations
+        (LLM calls, tools) inherit the agent's context for proper attribution.
+        """
         try:
             self._log_debug_event(
                 "on_agent_action", run_id, parent_run_id, action=action
@@ -439,6 +501,17 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
                     input=kwargs.get("inputs"),
                 )
 
+                # Push agent context onto stack for child observations
+                AntsPlatformOtelSpanAttributes.AGENT_ID
+
+                agent_name = agent_run._otel_span.get_attribute(
+                    AntsPlatformOtelSpanAttributes.AGENT_NAME
+                )
+                self._agent_stack.append(agent_name)
+                ants_platform_logger.debug(
+                    f"Pushed agent context onto stack: agent_id={agent_id}, agent_name={agent_name}"
+                )
+
         except Exception as e:
             ants_platform_logger.exception(e)
 
@@ -450,6 +523,10 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Run on agent finish.
+
+        Pops agent context from the stack when agent completes execution.
+        """
         try:
             self._log_debug_event(
                 "on_agent_finish", run_id, parent_run_id, finish=finish
@@ -467,6 +544,13 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
                     output=finish,
                     input=kwargs.get("inputs"),
                 )
+
+                # Pop agent context from stack when agent finishes
+                if self._agent_stack:
+                    popped_context = self._agent_stack.pop()
+                    ants_platform_logger.debug(
+                        f"Popped agent context from stack: agent_id={popped_context[0]}, agent_name={popped_context[1]}"
+                    )
 
         except Exception as e:
             ants_platform_logger.exception(e)
@@ -622,12 +706,20 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
                 serialized, "tool", **kwargs
             )
 
+            span_name = self.get_langchain_run_name(serialized, **kwargs)
+
+            # Extract agent context
+            agent_context = self._extract_agent_context_from_metadata(
+                metadata, observation_type, span_name
+            )
+
             span = self._get_parent_observation(parent_run_id).start_observation(
-                name=self.get_langchain_run_name(serialized, **kwargs),
+                name=span_name,
                 as_type=observation_type,
                 input=input_str,
                 metadata=meta,
                 level="DEBUG" if tags and LANGSMITH_TAG_HIDDEN in tags else None,
+                agent_name=agent_context["agent_name"],
             )
 
             self._attach_observation(run_id, span)
@@ -657,6 +749,12 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
             observation_type = self._get_observation_type_from_serialized(
                 serialized, "retriever", **kwargs
             )
+
+            # Extract agent context
+            agent_context = self._extract_agent_context_from_metadata(
+                metadata, observation_type, span_name
+            )
+
             span = self._get_parent_observation(parent_run_id).start_observation(
                 name=span_name,
                 as_type=observation_type,
@@ -666,6 +764,7 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
                     Optional[Literal["DEBUG", "DEFAULT", "WARNING", "ERROR"]],
                     span_level,
                 ),
+                agent_name=agent_context["agent_name"],
             )
 
             self._attach_observation(run_id, span)
@@ -768,8 +867,15 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
             if registered_prompt:
                 self._deregister_ants_platform_prompt(parent_run_id)
 
+            span_name = self.get_langchain_run_name(serialized, **kwargs)
+
+            # Extract agent context
+            agent_context = self._extract_agent_context_from_metadata(
+                metadata, "generation", span_name
+            )
+
             content = {
-                "name": self.get_langchain_run_name(serialized, **kwargs),
+                "name": span_name,
                 "input": prompts,
                 "metadata": self.__join_tags_and_metadata(
                     tags,
@@ -782,6 +888,7 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
                 "model": model_name,
                 "model_parameters": self._parse_model_parameters(kwargs),
                 "prompt": registered_prompt,
+                "agent_name": agent_context["agent_name"],
             }
 
             generation = self._get_parent_observation(parent_run_id).start_observation(
@@ -935,7 +1042,9 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
             final_dict.update(metadata)
 
         return (
-            _strip_ants_platform_keys_from_dict(final_dict, keep_ants_platform_trace_attributes)
+            _strip_ants_platform_keys_from_dict(
+                final_dict, keep_ants_platform_trace_attributes
+            )
             if final_dict != {}
             else None
         )
@@ -1076,7 +1185,9 @@ def _parse_usage_model(usage: typing.Union[pydantic.BaseModel, dict]) -> Any:
                 else captured_count
             )  # For Bedrock, the token count is a list when streamed
 
-            usage_model[ants_platform_key] = final_count  # Translate key and keep the value
+            usage_model[ants_platform_key] = (
+                final_count  # Translate key and keep the value
+            )
 
     if isinstance(usage_model, dict):
         if "input_token_details" in usage_model:
