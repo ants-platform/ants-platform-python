@@ -1,8 +1,7 @@
 <div align="center">
-   <img src="./static/logo.png" alt="ANTS Platform GitHub Banner">
+   <img src="./static/logo.png" alt="ANTS Platform" width="120">
+   <h1>Ants Platform Python SDK</h1>
 </div>
-
-# Ants Platform Python SDK
 
 [![MIT License](https://img.shields.io/badge/License-MIT-red.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 [![PyPI Version](https://img.shields.io/pypi/v/ants-platform.svg?style=flat-square&label=pypi+ants-platform)](https://pypi.python.org/pypi/ants-platform)

@@ -20,6 +20,14 @@ from ._client.span import (
 
 AntsPlatform = _client_module.AntsPlatform
 
+# Guardrails (available as ants_platform.guardrails or top-level imports)
+from .guardrails import (
+    AntsGuardrailsClient,
+    GuardrailViolationError,
+    GuardrailResult,
+    Violation,
+)
+
 __all__ = [
     "AntsPlatform",
     "get_client",
@@ -36,4 +44,9 @@ __all__ = [
     "AntsPlatformEvaluator",
     "AntsPlatformRetriever",
     "AntsPlatformGuardrail",
+    # Guardrails
+    "AntsGuardrailsClient",
+    "GuardrailViolationError",
+    "GuardrailResult",
+    "Violation",
 ]
