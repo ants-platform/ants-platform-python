@@ -6,6 +6,7 @@ from typing import Any, Optional
 from ..client import AntsGuardrailsClient
 from ..errors import GuardrailViolationError
 from .._tracing import start_trace_span, start_generation_span, end_generation_span, end_trace_span, send_trace_via_ingestion
+from ._guardrail_utils import effective_text, overall_guardrail_result
 
 
 class AntsOpenAI:
@@ -73,6 +74,8 @@ class _Completions:
         model = kwargs.get("model", "unknown")
         input_text = _extract_input_text(messages)
         guardrail_active = self._guardrails.enabled
+        input_check = None
+        output_check = None
 
         # STEP 1: Input guardrail check - no spans yet
         effective_kwargs = kwargs
@@ -80,11 +83,13 @@ class _Completions:
             input_check = self._guardrails.check_input(input_text)
             if input_check.result == "BLOCKED":
                 raise GuardrailViolationError("input", input_check)
-            if input_check.result == "SANITIZED" and input_check.sanitized_text:
+            if input_check.result == "SANITIZED" and input_check.sanitized_text is not None:
                 effective_kwargs = {
                     **kwargs,
                     "messages": [{"role": "user", "content": input_check.sanitized_text}],
                 }
+        effective_messages = effective_kwargs.get("messages", messages)
+        effective_input_text = effective_text(input_text, input_check)
 
         # STEP 2: LLM call
         start_time = time.time()
@@ -102,14 +107,20 @@ class _Completions:
 
         # STEP 3: Output guardrail check - still no spans
         if guardrail_active and output_text:
-            output_check = self._guardrails.check_output(output_text, input_text)
+            output_check = self._guardrails.check_output(output_text, effective_input_text)
             if output_check.result == "BLOCKED":
                 raise GuardrailViolationError("output", output_check)
+            output_text = effective_text(output_text, output_check)
+            response = _apply_sanitized_output(response, output_text)
+
+        guardrail_result = overall_guardrail_result(
+            guardrail_active, input_check, output_check
+        )
 
         # STEP 4: Both checks passed - NOW create and end spans
         with start_trace_span(
             self._agent_name or f"openai/{model}",
-            input_data=messages,
+            input_data=effective_messages,
             agent_id=self._agent_id,
             provider="openai",
             tags=["ants-sdk", "openai"],
@@ -117,7 +128,7 @@ class _Completions:
             with start_generation_span(
                 "generation",
                 model=model,
-                input_data=messages,
+                input_data=effective_messages,
                 provider="openai",
             ) as gen_span:
                 end_generation_span(
@@ -125,7 +136,7 @@ class _Completions:
                     output_data=output_text,
                     usage=usage,
                     latency_ms=latency_ms,
-                    guardrail_result="PASS" if guardrail_active else "NOT_CONFIGURED",
+                    guardrail_result=guardrail_result,
                 )
                 end_trace_span(trace_span, output_data=output_text)
 
@@ -136,15 +147,42 @@ class _Completions:
             model=model,
             provider="openai",
             agent_id=self._agent_id,
-            input_data=messages,
+            input_data=effective_messages,
             output_data=output_text,
             usage=usage,
             latency_ms=latency_ms,
             tags=["ants-sdk", "openai"],
-            guardrail_result="PASS" if guardrail_active else "NOT_CONFIGURED",
+            guardrail_result=guardrail_result,
         )
 
         return response
+
+
+def _apply_sanitized_output(response: Any, output_text: str) -> Any:
+    if not getattr(response, "choices", None):
+        return response
+
+    try:
+        first_choice = response.choices[0]
+        message = getattr(first_choice, "message", None)
+        if message is None:
+            return response
+
+        if (
+            hasattr(response, "model_copy")
+            and hasattr(first_choice, "model_copy")
+            and hasattr(message, "model_copy")
+        ):
+            updated_message = message.model_copy(update={"content": output_text})
+            updated_choices = list(response.choices)
+            updated_choices[0] = first_choice.model_copy(update={"message": updated_message})
+            return response.model_copy(update={"choices": updated_choices})
+
+        message.content = output_text
+    except Exception:
+        pass
+
+    return response
 
 
 def _extract_input_text(messages: list[dict[str, Any]]) -> str:
