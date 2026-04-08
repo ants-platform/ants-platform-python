@@ -6,6 +6,7 @@ from typing import Any, Optional
 from ..client import AntsGuardrailsClient
 from ..errors import GuardrailViolationError
 from .._tracing import start_trace_span, start_generation_span, end_generation_span, end_trace_span, send_trace_via_ingestion
+from ._guardrail_utils import effective_text, overall_guardrail_result
 
 
 class AntsBedrock:
@@ -42,6 +43,8 @@ class AntsBedrock:
         model = kwargs.get("modelId", "unknown")
         input_text = _extract_input_text(messages)
         guardrail_active = self._guardrails.enabled
+        input_check = None
+        output_check = None
 
         # STEP 1: Input guardrail check - no spans yet
         effective_kwargs = kwargs
@@ -49,10 +52,12 @@ class AntsBedrock:
             input_check = self._guardrails.check_input(input_text)
             if input_check.result == "BLOCKED":
                 raise GuardrailViolationError("input", input_check)
-            if input_check.result == "SANITIZED" and input_check.sanitized_text:
+            if input_check.result == "SANITIZED" and input_check.sanitized_text is not None:
                 effective_kwargs = {**kwargs, "messages": [
                     {"role": "user", "content": [{"text": input_check.sanitized_text}]}
                 ]}
+        effective_messages = effective_kwargs.get("messages", messages)
+        effective_input_text = effective_text(input_text, input_check)
 
         # STEP 2: LLM call
         start_time = time.time()
@@ -69,14 +74,20 @@ class AntsBedrock:
 
         # STEP 3: Output guardrail check - still no spans
         if guardrail_active and output_text:
-            output_check = self._guardrails.check_output(output_text, input_text)
+            output_check = self._guardrails.check_output(output_text, effective_input_text)
             if output_check.result == "BLOCKED":
                 raise GuardrailViolationError("output", output_check)
+            output_text = effective_text(output_text, output_check)
+            _apply_sanitized_output(response, output_text)
+
+        guardrail_result = overall_guardrail_result(
+            guardrail_active, input_check, output_check
+        )
 
         # STEP 4: Both checks passed - NOW create and end spans
         with start_trace_span(
             self._agent_name or f"bedrock/{model}",
-            input_data=messages,
+            input_data=effective_messages,
             agent_id=self._agent_id,
             provider="bedrock",
             tags=["ants-sdk", "bedrock"],
@@ -84,7 +95,7 @@ class AntsBedrock:
             with start_generation_span(
                 "generation",
                 model=model,
-                input_data=messages,
+                input_data=effective_messages,
                 provider="bedrock",
             ) as gen_span:
                 end_generation_span(
@@ -92,7 +103,7 @@ class AntsBedrock:
                     output_data=output_text,
                     usage=usage,
                     latency_ms=latency_ms,
-                    guardrail_result="PASS" if guardrail_active else "NOT_CONFIGURED",
+                    guardrail_result=guardrail_result,
                 )
                 end_trace_span(trace_span, output_data=output_text)
 
@@ -103,12 +114,12 @@ class AntsBedrock:
             model=model,
             provider="bedrock",
             agent_id=self._agent_id,
-            input_data=messages,
+            input_data=effective_messages,
             output_data=output_text,
             usage=usage,
             latency_ms=latency_ms,
             tags=["ants-sdk", "bedrock"],
-            guardrail_result="PASS" if guardrail_active else "NOT_CONFIGURED",
+            guardrail_result=guardrail_result,
         )
 
         return response
@@ -131,3 +142,22 @@ def _extract_output_text(response: dict[str, Any]) -> str:
         for block in message.get("content", [])
         if isinstance(block, dict) and "text" in block
     )
+
+
+def _apply_sanitized_output(response: dict[str, Any], output_text: str) -> None:
+    output = response.setdefault("output", {})
+    message = output.setdefault("message", {})
+    content = message.get("content")
+    if not isinstance(content, list):
+        message["content"] = [{"text": output_text}]
+        return
+
+    replaced = False
+    for block in content:
+        if not isinstance(block, dict) or "text" not in block:
+            continue
+        block["text"] = output_text if not replaced else ""
+        replaced = True
+
+    if not replaced:
+        content.append({"text": output_text})

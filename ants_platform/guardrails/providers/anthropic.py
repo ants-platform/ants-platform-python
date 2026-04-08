@@ -6,6 +6,7 @@ from typing import Any, Optional
 from ..client import AntsGuardrailsClient
 from ..errors import GuardrailViolationError
 from .._tracing import start_trace_span, start_generation_span, end_generation_span, end_trace_span, send_trace_via_ingestion
+from ._guardrail_utils import effective_text, overall_guardrail_result
 
 
 class AntsAnthropic:
@@ -53,6 +54,8 @@ class _Messages:
         model = kwargs.get("model", "unknown")
         input_text = _extract_input_text(messages)
         guardrail_active = self._guardrails.enabled
+        input_check = None
+        output_check = None
 
         # STEP 1: Input guardrail check - no spans yet
         effective_kwargs = kwargs
@@ -60,8 +63,10 @@ class _Messages:
             input_check = self._guardrails.check_input(input_text)
             if input_check.result == "BLOCKED":
                 raise GuardrailViolationError("input", input_check)
-            if input_check.result == "SANITIZED" and input_check.sanitized_text:
+            if input_check.result == "SANITIZED" and input_check.sanitized_text is not None:
                 effective_kwargs = {**kwargs, "messages": [{"role": "user", "content": input_check.sanitized_text}]}
+        effective_messages = effective_kwargs.get("messages", messages)
+        effective_input_text = effective_text(input_text, input_check)
 
         # STEP 2: LLM call
         start_time = time.time()
@@ -79,14 +84,20 @@ class _Messages:
 
         # STEP 3: Output guardrail check - still no spans
         if guardrail_active and output_text:
-            output_check = self._guardrails.check_output(output_text, input_text)
+            output_check = self._guardrails.check_output(output_text, effective_input_text)
             if output_check.result == "BLOCKED":
                 raise GuardrailViolationError("output", output_check)
+            output_text = effective_text(output_text, output_check)
+            response = _apply_sanitized_output(response, output_text)
+
+        guardrail_result = overall_guardrail_result(
+            guardrail_active, input_check, output_check
+        )
 
         # STEP 4: Both checks passed - NOW create and end spans
         with start_trace_span(
             self._agent_name or f"anthropic/{model}",
-            input_data=messages,
+            input_data=effective_messages,
             agent_id=self._agent_id,
             provider="anthropic",
             tags=["ants-sdk", "anthropic"],
@@ -94,7 +105,7 @@ class _Messages:
             with start_generation_span(
                 "generation",
                 model=model,
-                input_data=messages,
+                input_data=effective_messages,
                 provider="anthropic",
             ) as gen_span:
                 end_generation_span(
@@ -102,7 +113,7 @@ class _Messages:
                     output_data=output_text,
                     usage=usage,
                     latency_ms=latency_ms,
-                    guardrail_result="PASS" if guardrail_active else "NOT_CONFIGURED",
+                    guardrail_result=guardrail_result,
                 )
                 end_trace_span(trace_span, output_data=output_text)
 
@@ -113,12 +124,12 @@ class _Messages:
             model=model,
             provider="anthropic",
             agent_id=self._agent_id,
-            input_data=messages,
+            input_data=effective_messages,
             output_data=output_text,
             usage=usage,
             latency_ms=latency_ms,
             tags=["ants-sdk", "anthropic"],
-            guardrail_result="PASS" if guardrail_active else "NOT_CONFIGURED",
+            guardrail_result=guardrail_result,
         )
 
         return response
@@ -139,3 +150,37 @@ def _extract_input_text(messages: list[dict[str, Any]]) -> str:
 
 def _extract_output_text(response: Any) -> str:
     return "".join(block.text for block in response.content if block.type == "text")
+
+
+def _apply_sanitized_output(response: Any, output_text: str) -> Any:
+    content = getattr(response, "content", None)
+    if not content:
+        return response
+
+    updated_content: list[Any] = []
+    replaced = False
+    for block in content:
+        if getattr(block, "type", None) == "text":
+            replacement_text = output_text if not replaced else ""
+            if hasattr(block, "model_copy"):
+                updated_block = block.model_copy(update={"text": replacement_text})
+            else:
+                try:
+                    block.text = replacement_text
+                except Exception:
+                    pass
+                updated_block = block
+            replaced = True
+            updated_content.append(updated_block)
+        else:
+            updated_content.append(block)
+
+    if not replaced:
+        return response
+    if hasattr(response, "model_copy"):
+        return response.model_copy(update={"content": updated_content})
+    try:
+        response.content = updated_content
+    except Exception:
+        pass
+    return response
