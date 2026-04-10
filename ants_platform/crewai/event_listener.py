@@ -16,6 +16,7 @@ Usage:
 """
 
 import threading
+import re
 from contextvars import Token
 from typing import Any, Dict, Optional, Union, cast
 
@@ -26,7 +27,6 @@ from opentelemetry.context import _RUNTIME_CONTEXT
 from ants_platform._client.get_client import get_client
 from ants_platform._client.span import (
     AntsPlatformAgent,
-    AntsPlatformChain,
     AntsPlatformGeneration,
     AntsPlatformGuardrail,
     AntsPlatformSpan,
@@ -51,11 +51,6 @@ try:
         LLMCallCompletedEvent,
         LLMCallFailedEvent,
         LLMCallStartedEvent,
-    )
-    from crewai.events.types.task_events import (
-        TaskCompletedEvent,
-        TaskFailedEvent,
-        TaskStartedEvent,
     )
     from crewai.events.types.tool_usage_events import (
         ToolUsageErrorEvent,
@@ -96,7 +91,6 @@ except ImportError:
 _Observation = Union[
     AntsPlatformSpan,
     AntsPlatformAgent,
-    AntsPlatformChain,
     AntsPlatformGeneration,
     AntsPlatformTool,
     AntsPlatformGuardrail,
@@ -149,7 +143,6 @@ class EventListener(BaseEventListener):
         # Observation registries — keyed by CrewAI entity IDs (all string keys)
         self._crew_spans: Dict[str, AntsPlatformSpan] = {}
         self._agent_spans: Dict[str, AntsPlatformAgent] = {}
-        self._task_spans: Dict[str, AntsPlatformChain] = {}
         self._llm_spans: Dict[str, AntsPlatformGeneration] = {}
         self._tool_spans: Dict[str, AntsPlatformTool] = {}
         self._guardrail_spans: Dict[str, AntsPlatformGuardrail] = {}
@@ -412,15 +405,35 @@ class EventListener(BaseEventListener):
 
         return "crew"  # fallback
 
+    def _wait_for_agent_span(self, agent_id: str, timeout: float = 15.0) -> Any:
+        """Wait for an agent span to be registered.
+
+        CrewAI fires LLM/tool events concurrently with agent events.
+        The LLM event may arrive before the agent span is created.
+        This method polls briefly so child spans attach to the correct agent.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout
+        poll_interval = 0.05  # 50ms
+        while time.monotonic() < deadline:
+            with self._lock:
+                if agent_id in self._agent_spans:
+                    return self._agent_spans[agent_id]
+                # Also check if _current_agent was set in the meantime
+                if self._current_agent is not None:
+                    return self._current_agent
+            time.sleep(poll_interval)
+        return None
+
     def _get_parent_for_event(self, event: Any) -> Any:
         """Find the correct parent observation for a child event.
 
         Priority:
         1. Current agent on this thread (set by _set_current_agent)
-        2. Agent by event.agent_id in registry
-        3. Task by event.task_id in registry
-        4. Most recent crew span
-        5. Wait for crew span (handles event ordering race)
+        2. Agent by event.agent_id in registry (wait if not yet registered)
+        3. Most recent crew span
+        4. Wait for crew span (handles event ordering race)
         """
         with self._lock:
             # Current active agent is the most reliable parent
@@ -431,10 +444,14 @@ class EventListener(BaseEventListener):
             if agent_id and agent_id in self._agent_spans:
                 return self._agent_spans[agent_id]
 
-            task_id = getattr(event, "task_id", None)
-            if task_id and task_id in self._task_spans:
-                return self._task_spans[task_id]
+        # Agent ID present but span not yet registered — wait for it
+        agent_id = getattr(event, "agent_id", None)
+        if agent_id:
+            agent_span = self._wait_for_agent_span(agent_id)
+            if agent_span:
+                return agent_span
 
+        with self._lock:
             if self._crew_spans:
                 return next(reversed(self._crew_spans.values()))
 
@@ -552,7 +569,6 @@ class EventListener(BaseEventListener):
         """Register all event handlers on CrewAI's event bus."""
         self._register_crew_events(crewai_event_bus)
         self._register_agent_events(crewai_event_bus)
-        self._register_task_events(crewai_event_bus)
         self._register_llm_events(crewai_event_bus)
         self._register_tool_events(crewai_event_bus)
 
@@ -653,6 +669,18 @@ class EventListener(BaseEventListener):
                     id(source)
                 )
                 agent_role_str = str(agent_role).strip()
+                # Prefer the original role template (before CrewAI
+                # interpolates {topic} etc.) for a cleaner display name.
+                original_role = getattr(agent, "_original_role", None)
+                if original_role and isinstance(original_role, str):
+                    # Strip template variables: "Expert Writer on {topic}" → "Expert Writer"
+                    cleaned = re.sub(r"\s*\{[^}]+\}\s*", " ", original_role).strip()
+                    # Remove trailing connectors like "on", "about", "for"
+                    cleaned = re.sub(r"\s+(?:on|about|for|in)\s*$", "", cleaned).strip()
+                    # Fall back to interpolated role if template was entirely variables
+                    display_name = cleaned if cleaned else agent_role_str
+                else:
+                    display_name = agent_role_str
 
                 tools = getattr(event, "tools", [])
                 tool_names = [
@@ -661,7 +689,7 @@ class EventListener(BaseEventListener):
 
                 parent = self._get_crew_span()
                 span = parent.start_observation(
-                    name=agent_role_str,
+                    name=display_name,
                     as_type="span",
                     agent_name=self._get_crew_agent_name(),
                     input={
@@ -725,93 +753,6 @@ class EventListener(BaseEventListener):
                 msg = f"CrewAI event handler error (agent_error): {e}"
                 ants_platform_logger.warning(msg)
 
-    # ── Task Events ────────────────────────────────────────────────────
-
-    def _register_task_events(self, bus: Any) -> None:
-        @bus.on(TaskStartedEvent)
-        def on_task_started(source: Any, event: TaskStartedEvent) -> None:
-            try:
-                task = getattr(event, "task", None) or source
-                task_id = str(
-                    getattr(event, "task_id", None)
-                    or getattr(source, "id", None)
-                    or id(source)
-                )
-
-                description = (
-                    getattr(task, "description", None)
-                    or getattr(task, "name", None)
-                    or "task"
-                )
-                desc_str = str(description).strip()
-                name = (
-                    desc_str[:80] + "..."
-                    if len(desc_str) > 80
-                    else desc_str
-                )
-
-                parent = self._get_parent_for_event(event)
-
-                span = parent.start_observation(
-                    name=name,
-                    as_type="chain",
-                    agent_name=self._get_crew_agent_name(),
-                    input={
-                        "description": desc_str,
-                        "expected_output": getattr(
-                            task, "expected_output", None
-                        ),
-                        "context": getattr(event, "context", None),
-                    },
-                    metadata={
-                        "crewai.task_id": task_id,
-                    },
-                )
-                self._attach(f"task:{task_id}", span, self._task_spans)
-
-                ants_platform_logger.debug("CrewAI: Task '%s' started", name)
-            except Exception as e:
-                msg = f"CrewAI event handler error (task_started): {e}"
-                ants_platform_logger.warning(msg)
-
-        @bus.on(TaskCompletedEvent)
-        def on_task_completed(source: Any, event: TaskCompletedEvent) -> None:
-            try:
-                task_id = str(
-                    getattr(event, "task_id", None)
-                    or getattr(source, "id", None)
-                    or id(source)
-                )
-
-                span = self._detach(f"task:{task_id}", self._task_spans)
-                if span:
-                    output = getattr(event, "output", None)
-                    raw = getattr(output, "raw", None) if output else None
-                    span.update(output=raw or str(output)).end()
-            except Exception as e:
-                msg = f"CrewAI event handler error (task_completed): {e}"
-                ants_platform_logger.warning(msg)
-
-        @bus.on(TaskFailedEvent)
-        def on_task_failed(source: Any, event: TaskFailedEvent) -> None:
-            try:
-                task_id = str(
-                    getattr(event, "task_id", None)
-                    or getattr(source, "id", None)
-                    or id(source)
-                )
-
-                span = self._detach(f"task:{task_id}", self._task_spans)
-                if span:
-                    error_msg = getattr(event, "error", "Task failed")
-                    span.update(
-                        level="ERROR",
-                        status_message=error_msg,
-                    ).end()
-            except Exception as e:
-                msg = f"CrewAI event handler error (task_failed): {e}"
-                ants_platform_logger.warning(msg)
-
     # ── LLM Events ─────────────────────────────────────────────────────
 
     def _register_llm_events(self, bus: Any) -> None:
@@ -829,11 +770,6 @@ class EventListener(BaseEventListener):
                 parent = self._get_parent_for_event(event)
                 resolved_name = self._get_crew_agent_name()
 
-                ants_platform_logger.warning(
-                    "DEBUG LLM: model=%s, resolved_agent_name=%s, parent=%s",
-                    model, resolved_name, type(parent).__name__,
-                )
-
                 gen = parent.start_observation(
                     name=f"LLM Call ({model or 'unknown'})",
                     as_type="generation",
@@ -850,9 +786,6 @@ class EventListener(BaseEventListener):
 
                 # Store key on thread-local stack so completion can find it
                 self._push_llm_key(llm_key)
-                ants_platform_logger.warning(
-                    "DEBUG LLM: span created OK, key=%s", llm_key
-                )
             except Exception as e:
                 msg = f"CrewAI event handler error (llm_started): {e}"
                 ants_platform_logger.warning(msg)
@@ -862,7 +795,6 @@ class EventListener(BaseEventListener):
             source: Any, event: LLMCallCompletedEvent
         ) -> None:
             try:
-                ants_platform_logger.warning("DEBUG LLM completed: entering handler")
                 # Pop the LLM key from the current thread's stack
                 llm_key = self._pop_llm_key()
                 if not llm_key:
@@ -874,13 +806,6 @@ class EventListener(BaseEventListener):
 
                 response = getattr(event, "response", None)
                 usage = getattr(response, "usage", None)
-
-                ants_platform_logger.warning(
-                    "DEBUG LLM response: type=%s, has_choices=%s, usage=%s",
-                    type(response).__name__ if response else None,
-                    hasattr(response, "choices") if response else False,
-                    usage,
-                )
 
                 # Extract output text — try multiple paths since
                 # LiteLLM response format varies by provider
@@ -907,12 +832,6 @@ class EventListener(BaseEventListener):
                         resp_str = str(response)
                         if len(resp_str) < 10000:
                             output_text = resp_str
-
-                ants_platform_logger.warning(
-                    "DEBUG LLM output: len=%s, preview=%s",
-                    len(output_text) if output_text else 0,
-                    output_text[:80] if output_text else "NONE",
-                )
 
                 update_kwargs: Dict[str, Any] = {
                     "output": output_text,

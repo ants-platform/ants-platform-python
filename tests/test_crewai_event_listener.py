@@ -240,7 +240,6 @@ def _build_event_listener(client: AntsPlatform, bus: MockEventBus):
     listener._lock = threading.Lock()
     listener._crew_spans = {}
     listener._agent_spans = {}
-    listener._task_spans = {}
     listener._llm_spans = {}
     listener._tool_spans = {}
     listener._guardrail_spans = {}
@@ -578,118 +577,142 @@ class TestAgentEvents(TestCrewAIBase):
         )
 
 
-# ── Task Event Tests ──────────────────────────────────────────────────
+# ── Agent Display Name Tests ─────────────────────────────────────────
 
 
-class TestTaskEvents(TestCrewAIBase):
-    """Tests for task start/complete/fail events."""
+class TestAgentDisplayName(TestCrewAIBase):
+    """Tests for agent display name extraction from role templates."""
 
-    def _start_crew_and_agent(self, mock_bus):
-        """Helper: crew + agent context."""
-        crew_source = MagicMock(id="crew-t")
+    def _start_crew(self, mock_bus):
+        source = MagicMock(id="crew-dn")
         mock_bus.emit(
             CrewKickoffStartedEvent,
-            crew_source,
-            CrewKickoffStartedEvent(crew_name="task_crew"),
+            source,
+            CrewKickoffStartedEvent(crew_name="display_name_crew"),
         )
+        return source
+
+    def _emit_agent(self, mock_bus, role, original_role, agent_id="agent-dn"):
+        """Helper: emit agent start+complete with given role and _original_role."""
+        agent_obj = MagicMock(role=role, goal="test")
+        # Set _original_role properly — None means no template
+        if original_role is None:
+            agent_obj._original_role = MagicMock()  # non-string, will be skipped
+        else:
+            agent_obj._original_role = original_role
         mock_bus.emit(
             AgentExecutionStartedEvent,
             MagicMock(),
             AgentExecutionStartedEvent(
-                agent=MagicMock(role="Worker", goal="Do tasks"),
-                agent_id="agent-t",
-                tools=[],
-            ),
-        )
-        return crew_source
-
-    def test_task_creates_chain_span(
-        self, event_listener, mock_bus, memory_exporter
-    ):
-        """Task creates a chain observation."""
-        self._start_crew_and_agent(mock_bus)
-
-        task_obj = MagicMock(
-            description="Write a blog post about AI",
-            expected_output="A 500-word blog",
-        )
-        task_source = MagicMock(id="task-1")
-        mock_bus.emit(
-            TaskStartedEvent,
-            task_source,
-            TaskStartedEvent(task=task_obj, task_id="task-1", context=None),
-        )
-
-        output_obj = MagicMock(raw="Blog post content here")
-        mock_bus.emit(
-            TaskCompletedEvent,
-            task_source,
-            TaskCompletedEvent(task_id="task-1", output=output_obj),
-        )
-
-        task_span = self.find_span(memory_exporter, "Write a blog post about AI")
-        assert task_span is not None
-        assert (
-            self.get_attr(
-                task_span, AntsPlatformOtelSpanAttributes.OBSERVATION_TYPE
-            )
-            == "chain"
-        )
-
-    def test_task_long_description_truncated(
-        self, event_listener, mock_bus, memory_exporter
-    ):
-        """Task descriptions longer than 100 chars are truncated in span name."""
-        self._start_crew_and_agent(mock_bus)
-
-        long_desc = "A" * 150
-        task_source = MagicMock(id="task-long")
-        mock_bus.emit(
-            TaskStartedEvent,
-            task_source,
-            TaskStartedEvent(
-                task=MagicMock(description=long_desc, expected_output="result"),
-                task_id="task-long",
+                agent=agent_obj, agent_id=agent_id, tools=[],
             ),
         )
         mock_bus.emit(
-            TaskCompletedEvent,
-            task_source,
-            TaskCompletedEvent(task_id="task-long", output="done"),
+            AgentExecutionCompletedEvent,
+            MagicMock(),
+            AgentExecutionCompletedEvent(agent_id=agent_id, output="done"),
         )
 
-        spans = self.get_all_spans(memory_exporter)
-        task_spans = [s for s in spans if s["name"].startswith("AAA")]
-        assert len(task_spans) == 1
-        assert task_spans[0]["name"] == "A" * 80 + "..."
-
-    def test_task_failed_sets_error(
-        self, event_listener, mock_bus, memory_exporter
-    ):
-        """Task failure ends the span with level=ERROR."""
-        self._start_crew_and_agent(mock_bus)
-
-        task_source = MagicMock(id="task-fail")
-        mock_bus.emit(
-            TaskStartedEvent,
-            task_source,
-            TaskStartedEvent(
-                task=MagicMock(description="Failing task", expected_output="x"),
-                task_id="task-fail",
-            ),
+    def test_role_with_topic_on(self, event_listener, mock_bus, memory_exporter):
+        """'Expert Writer on {topic}' → 'Expert Writer'"""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="Expert Writer on The impact of AI",
+            original_role="Expert Writer on {topic}",
         )
-        mock_bus.emit(
-            TaskFailedEvent,
-            task_source,
-            TaskFailedEvent(task_id="task-fail", error="Timeout"),
-        )
+        assert self.find_span(memory_exporter, "Expert Writer") is not None
 
-        span = self.find_span(memory_exporter, "Failing task")
-        assert span is not None
-        assert (
-            self.get_attr(span, AntsPlatformOtelSpanAttributes.OBSERVATION_LEVEL)
-            == "ERROR"
+    def test_role_with_topic_about(self, event_listener, mock_bus, memory_exporter):
+        """'Research Analyst about {subject}' → 'Research Analyst'"""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="Research Analyst about quantum computing",
+            original_role="Research Analyst about {subject}",
         )
+        assert self.find_span(memory_exporter, "Research Analyst") is not None
+
+    def test_role_with_topic_for(self, event_listener, mock_bus, memory_exporter):
+        """'Content Creator for {brand}' → 'Content Creator'"""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="Content Creator for Nike",
+            original_role="Content Creator for {brand}",
+        )
+        assert self.find_span(memory_exporter, "Content Creator") is not None
+
+    def test_role_with_topic_in(self, event_listener, mock_bus, memory_exporter):
+        """'Market Expert in {industry}' → 'Market Expert'"""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="Market Expert in fintech",
+            original_role="Market Expert in {industry}",
+        )
+        assert self.find_span(memory_exporter, "Market Expert") is not None
+
+    def test_role_with_multiple_vars(self, event_listener, mock_bus, memory_exporter):
+        """'{language} Developer for {project}' → 'Developer'"""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="Python Developer for Ants Platform",
+            original_role="{language} Developer for {project}",
+        )
+        assert self.find_span(memory_exporter, "Developer") is not None
+
+    def test_role_no_template_simple(self, event_listener, mock_bus, memory_exporter):
+        """Simple role without _original_role uses role as-is."""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="Senior Data Scientist",
+            original_role=None,
+        )
+        assert self.find_span(memory_exporter, "Senior Data Scientist") is not None
+
+    def test_role_no_template_no_interpolation(self, event_listener, mock_bus, memory_exporter):
+        """Role without any {vars} stays unchanged."""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="QA Engineer",
+            original_role="QA Engineer",
+        )
+        assert self.find_span(memory_exporter, "QA Engineer") is not None
+
+    def test_role_only_var(self, event_listener, mock_bus, memory_exporter):
+        """'{role_name}' → empty string falls back to role."""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="Dynamic Agent",
+            original_role="{role_name}",
+        )
+        # After stripping {role_name} we get empty → falls back to role
+        assert self.find_span(memory_exporter, "Dynamic Agent") is not None
+
+    def test_role_var_in_middle(self, event_listener, mock_bus, memory_exporter):
+        """'Senior {domain} Analyst' → 'Senior Analyst'"""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="Senior Financial Analyst",
+            original_role="Senior {domain} Analyst",
+        )
+        assert self.find_span(memory_exporter, "Senior Analyst") is not None
+
+    def test_role_natural_on_word(self, event_listener, mock_bus, memory_exporter):
+        """'Hands on Expert' without template keeps full name."""
+        self._start_crew(mock_bus)
+        self._emit_agent(
+            mock_bus,
+            role="Hands on Expert",
+            original_role="Hands on Expert",
+        )
+        assert self.find_span(memory_exporter, "Hands on Expert") is not None
 
 
 # ── LLM Event Tests ──────────────────────────────────────────────────
@@ -987,22 +1010,7 @@ class TestFullTraceHierarchy(TestCrewAIBase):
             ),
         )
 
-        # 3. Task starts
-        task_source = MagicMock(id="task-full")
-        mock_bus.emit(
-            TaskStartedEvent,
-            task_source,
-            TaskStartedEvent(
-                task=MagicMock(
-                    description="Research AI impact",
-                    expected_output="Report",
-                ),
-                task_id="task-full",
-                agent_id="agent-full",
-            ),
-        )
-
-        # 4. LLM call
+        # 3. LLM call
         mock_bus.emit(
             LLMCallStartedEvent,
             MagicMock(),
@@ -1027,15 +1035,7 @@ class TestFullTraceHierarchy(TestCrewAIBase):
             LLMCallCompletedEvent(response=response, model="gpt-4o-mini"),
         )
 
-        # 5. End: task, agent, crew
-        mock_bus.emit(
-            TaskCompletedEvent,
-            task_source,
-            TaskCompletedEvent(
-                task_id="task-full",
-                output=MagicMock(raw="AI impact report"),
-            ),
-        )
+        # 4. End: agent, crew
         mock_bus.emit(
             AgentExecutionCompletedEvent,
             MagicMock(),
@@ -1052,12 +1052,10 @@ class TestFullTraceHierarchy(TestCrewAIBase):
         # Verify all spans exist
         crew = self.find_span(memory_exporter, "full_crew")
         agent = self.find_span(memory_exporter, "Researcher")
-        task = self.find_span(memory_exporter, "Research AI impact")
         llm = self.find_span(memory_exporter, "LLM Call (gpt-4o-mini)")
 
         assert crew is not None, "Crew span should exist"
         assert agent is not None, "Agent span should exist"
-        assert task is not None, "Task span should exist"
         assert llm is not None, "LLM span should exist"
 
         # Verify parent-child: Agent -> Crew
@@ -1066,11 +1064,10 @@ class TestFullTraceHierarchy(TestCrewAIBase):
         # Verify observation types
         assert self.get_attr(crew, AntsPlatformOtelSpanAttributes.OBSERVATION_TYPE) == "span"
         assert self.get_attr(agent, AntsPlatformOtelSpanAttributes.OBSERVATION_TYPE) == "span"
-        assert self.get_attr(task, AntsPlatformOtelSpanAttributes.OBSERVATION_TYPE) == "chain"
         assert self.get_attr(llm, AntsPlatformOtelSpanAttributes.OBSERVATION_TYPE) == "generation"
 
         # All spans share the same trace ID
-        trace_ids = {crew["trace_id"], agent["trace_id"], task["trace_id"], llm["trace_id"]}
+        trace_ids = {crew["trace_id"], agent["trace_id"], llm["trace_id"]}
         assert len(trace_ids) == 1, f"All spans should share one trace ID, got {trace_ids}"
 
 
