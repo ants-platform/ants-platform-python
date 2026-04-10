@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "ants-platform"
 
-version = "3.5.1"
+version = "3.6.0"
 description = "A client library for accessing ants-platform"
 authors = ["ants-platform <developers@ants-platform.com>"]
 license = "MIT"
@@ -43,8 +43,38 @@ langchain = ["langchain"]
 crewai = ["crewai"]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ants-platform"
+version = "3.6.0"
+description = "A client library for accessing ants-platform"
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.9,<4.0"
+dependencies = [
+    "httpx>=0.15.4,<1.0",
+    "pydantic>=1.10.7,<3.0",
+    "backoff>=1.10.0",
+    "wrapt>=1.14,<2.0",
+    "packaging>=23.2,<26.0",
+    "requests>=2,<3",
+    "opentelemetry-api>=1.33.1,<2.0",
+    "opentelemetry-sdk>=1.33.1,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.33.1,<2.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=0.27.8"]
+langchain = ["langchain>=0.0.309"]
+crewai = ["crewai>=0.80.0; python_version>='3.10' and python_version<'3.14'"]
+
+[project.scripts]
+ants-onboard = "ants_platform.cli.onboard:main"
+
+[tool.setuptools.packages.find]
+include = ["ants_platform*"]
 
 [tool.pytest.ini_options]
 log_cli = true
@@ -110,3 +140,4 @@ ignore_errors = true
 
 [tool.poetry.scripts]
 release = "scripts.release:main"
+ants-onboard = "ants_platform.cli.onboard:main"
