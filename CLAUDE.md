@@ -1,133 +1,73 @@
-# CLAUDE.md
+# ants-platform-python — Claude Code orientation
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Python SDK (`ants-platform` on PyPI) for the Agentic Ants platform. Talks to `api.agenticants.ai`. OpenTelemetry-first tracing, auto-instrumentation for OpenAI / LangChain / CrewAI, plus a Fern-generated REST client. Currently `3.6.0` (the `3.x` is inherited from the Langfuse SDK lineage; backend is `0.1.x`).
 
-## Project Overview
+## Layout
 
-This is the Ants Platform Python SDK, a client library for accessing the Ants Platform observability platform. The SDK provides integration with OpenTelemetry (OTel) for tracing, automatic instrumentation for popular LLM frameworks (OpenAI, Langchain, etc.), and direct API access to Ants Platform's features.
+```
+ants_platform/
+  _client/                 Core SDK on top of OTel.
+    client.py              AntsPlatform client + lifecycle.
+    span.py                AntsPlatformSpan / Generation / Event wrappers.
+    observe.py             @observe decorator.
+    datasets.py            Dataset operations.
+    environment_variables.py
+  api/                     Fern-generated REST client. DO NOT hand-edit.
+  _task_manager/           Background batching, media upload, score ingestion.
+  _utils/, _crewai_bootstrap.py
+  openai.py                OpenAI auto-instrumentation.
+  langchain/               LangChain CallbackHandler integration.
+  crewai/                  CrewAI integration (gated by py>=3.10,<3.14).
+  guardrails/              Guardrails client.
+  cli/                     CLI entrypoints.
+  media.py, model.py, types.py, logger.py, version.py
+tests/                     pytest, respx (HTTP mocking), pytest-httpserver.
+scripts/                   Release / housekeeping scripts.
+pyproject.toml             Poetry. Python >=3.9,<4.0.
+ruff.toml / ci.ruff.toml   Local (strict) vs CI (permissive) lint configs.
+```
 
-## Development Commands
+## Commands
 
-### Setup
-```bash
-# Install Poetry plugins (one-time setup)
-poetry self add poetry-dotenv-plugin
-poetry self add poetry-bumpversion
-
-# Install all dependencies including optional extras
+```sh
+poetry self add poetry-dotenv-plugin poetry-bumpversion        # one-time
 poetry install --all-extras
-
-# Setup pre-commit hooks
 poetry run pre-commit install
-```
 
-### Testing
-```bash
-# Run all tests with verbose output
-poetry run pytest -s -v --log-cli-level=INFO
+poetry run pytest -s -v --log-cli-level=INFO                   # all tests
+poetry run pytest -s -v tests/test_core_sdk.py::test_flush     # single test
+poetry run pytest -n auto                                      # parallel
 
-# Run a specific test
-poetry run pytest -s -v --log-cli-level=INFO tests/test_core_sdk.py::test_flush
-
-# Run tests in parallel (faster)
-poetry run pytest -s -v --log-cli-level=INFO -n auto
-```
-
-### Code Quality
-```bash
-# Format code with Ruff
 poetry run ruff format .
-
-# Run linting (development config)
 poetry run ruff check .
-
-# Run type checking
 poetry run mypy .
 
-# Run pre-commit hooks manually
-poetry run pre-commit run --all-files
-```
-
-### Building and Releasing
-```bash
-# Build the package
 poetry build
-
-# Run release script (handles versioning, building, tagging, and publishing)
-poetry run release
-
-# Generate documentation
+poetry run release                                             # versioning + build + tag + publish
 poetry run pdoc -o docs/ --docformat google --logo "static/Ants_Platform_Blended.png" ants_platform
 ```
 
-## Architecture
+E2E tests against real OpenAI / SERP keys are decorated `@pytest.mark.skip` by default — remove the marker locally to run them. Create `.env` from `.env.template` for integration tests.
 
-### Core Components
+## Things to know
 
-- **`ants_platform/_client/`**: Main SDK implementation built on OpenTelemetry
-  - `client.py`: Core AntsPlatform client with OTel integration
-  - `span.py`: AntsPlatformSpan, AntsPlatformGeneration, AntsPlatformEvent classes
-  - `observe.py`: Decorator for automatic instrumentation
-  - `datasets.py`: Dataset management functionality
+- **Fern-generated `ants_platform/api/`.** Regenerate by running Fern in `agentic-ants-lf-fork`, copying `generated/python` over `ants_platform/api/`, then `poetry run ruff format .`. Hand edits get clobbered.
+- **Default host is stale.** `_client/environment_variables.py` and `client.py` hard-code `https://cloud.ants-platform.com` as the default. The real production host is `https://api.agenticants.ai`. Until the default is updated, every consumer must set `ANTS_PLATFORM_HOST` explicitly. (TODO: fix the default to point at `api.agenticants.ai`.)
+- **Env var prefix.** `ANTS_PLATFORM_PUBLIC_KEY`, `ANTS_PLATFORM_SECRET_KEY`, `ANTS_PLATFORM_HOST`, `ANTS_PLATFORM_DEBUG`, `ANTS_PLATFORM_TRACING_ENABLED`, `ANTS_PLATFORM_SAMPLE_RATE`. Don't introduce other prefixes (e.g. `LANGFUSE_*`, `AGENTICANTS_*`).
+- **Async-first batching.** Spans flush via background workers in `_task_manager/`. Tests that assert on emitted spans must call `client.flush()` first.
+- **Pydantic 1 + 2 supported** (`pydantic = ">=1.10.7, <3.0"`). Don't use Pydantic-2-only syntax in shared code.
+- **Optional extras**: `openai`, `langchain`, `crewai`. Don't move these into the base dependency block — installs would explode.
+- **Exception messages**: don't put f-strings directly in `raise SomeException(f"...")`; assign to a variable first (existing repo convention; flagged by lint).
+- **Don't remove unit-test cases just to make them pass.** Adjust the test only when underlying behavior intentionally changed.
 
-- **`ants_platform/api/`**: Auto-generated Fern API client
-  - Contains all API resources and types
-  - Generated from OpenAPI spec - do not manually edit these files
+## Compatibility
 
-- **`ants_platform/_task_manager/`**: Background processing
-  - Media upload handling and queue management
-  - Score ingestion consumer
+| | |
+|---|---|
+| Python | 3.9 – 3.13 (CrewAI extra: 3.10 – 3.13) |
+| Backend | `agentic-ants-lf-fork` v0.1.x (`api.agenticants.ai`) |
+| OTel | `opentelemetry-api/sdk/exporter-otlp-proto-http ^1.33.1` |
 
-- **Integration modules**:
-  - `ants_platform/openai.py`: OpenAI instrumentation
-  - `ants_platform/langchain/`: Langchain integration via CallbackHandler
+## Approval boundaries
 
-### Key Design Patterns
-
-The SDK is built on OpenTelemetry for observability, using:
-- Spans for tracing LLM operations
-- Attributes for metadata (see `AntsOtelSpanAttributes`)
-- Resource management for efficient batching and flushing
-
-The client follows an async-first design with automatic batching of events and background flushing to the Ants Platform API.
-
-## Configuration
-
-Environment variables (defined in `_client/environment_variables.py`):
-- `ANTS_PLATFORM_PUBLIC_KEY` / `ANTS_PLATFORM_SECRET_KEY`: API credentials
-- `ANTS_PLATFORM_HOST`: API endpoint (defaults to https://cloud.ants-platform.com)
-- `ANTS_PLATFORM_DEBUG`: Enable debug logging
-- `ANTS_PLATFORM_TRACING_ENABLED`: Enable/disable tracing
-- `ANTS_PLATFORM_SAMPLE_RATE`: Sampling rate for traces
-
-## Testing Notes
-
-- Create `.env` file based on `.env.template` for integration tests
-- E2E tests with external APIs (OpenAI, SERP) are typically skipped in CI
-- Remove `@pytest.mark.skip` decorators in test files to run external API tests
-- Tests use `respx` for HTTP mocking and `pytest-httpserver` for test servers
-
-## Important Files
-
-- `pyproject.toml`: Poetry configuration, dependencies, and tool settings
-- `ruff.toml`: Local development linting config (stricter)
-- `ci.ruff.toml`: CI linting config (more permissive)
-- `ants_platform/version.py`: Version string (updated by release script)
-
-## API Generation
-
-The `ants_platform/api/` directory is auto-generated from the Ants Platform OpenAPI specification using Fern. To update:
-
-1. Generate new SDK in main Ants Platform repo
-2. Copy generated files from `generated/python` to `ants_platform/api/`
-3. Run `poetry run ruff format .` to format the generated code
-
-## Testing Guidelines
-
-### Approach to Test Changes
-- Don't remove functionality from existing unit tests just to make tests pass. Only change the test, if underlying code changes warrant a test change.
-
-## Python Code Rules
-
-### Exception Handling
-- Exception must not use an f-string literal, assign to variable first
+`poetry install`, `pytest`, `ruff`, `mypy`, `poetry build`, file edits — fine. `poetry run release` (publishes to PyPI), `git commit/push`, version bumps — ask first.
