@@ -71,3 +71,8 @@ E2E tests against real OpenAI / SERP keys are decorated `@pytest.mark.skip` by d
 ## Approval boundaries
 
 `poetry install`, `pytest`, `ruff`, `mypy`, `poetry build`, file edits — fine. `poetry run release` (publishes to PyPI), `git commit/push`, version bumps — ask first.
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+<!-- SPECKIT END -->
