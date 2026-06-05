@@ -33,3 +33,7 @@ docs
 tests/mocks/llama-index-storage
 
 *.local.*
+
+# Ralph loop run artifacts
+.specify/logs/
+.specify/ralph/.run-prompt.md
