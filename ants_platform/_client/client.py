@@ -118,7 +118,7 @@ class AntsPlatform:
     Parameters:
         public_key (Optional[str]): Your Ants Platform public API key. Can also be set via ANTS_PLATFORM_PUBLIC_KEY environment variable.
         secret_key (Optional[str]): Your Ants Platform secret API key. Can also be set via ANTS_PLATFORM_SECRET_KEY environment variable.
-        host (Optional[str]): The Ants Platform API host URL. Defaults to "https://cloud.ants-platform.com". Can also be set via ANTS_PLATFORM_HOST environment variable.
+        host (Optional[str]): The Ants Platform API host URL. Defaults to "https://api.agenticants.ai". Can also be set via ANTS_PLATFORM_HOST environment variable.
         timeout (Optional[int]): Timeout in seconds for API requests. Defaults to 5 seconds.
         httpx_client (Optional[httpx.Client]): Custom httpx client for making non-tracing HTTP requests. If not provided, a default client will be created.
         debug (bool): Enable debug logging. Defaults to False. Can also be set via ANTS_PLATFORM_DEBUG environment variable.
@@ -196,7 +196,7 @@ class AntsPlatform:
         tracer_provider: Optional[TracerProvider] = None,
     ):
         self._host = host or cast(
-            str, os.environ.get(ANTS_PLATFORM_HOST, "https://cloud.ants-platform.com")
+            str, os.environ.get(ANTS_PLATFORM_HOST, "https://api.agenticants.ai")
         )
         self._environment = environment or cast(
             str, os.environ.get(ANTS_PLATFORM_TRACING_ENVIRONMENT)

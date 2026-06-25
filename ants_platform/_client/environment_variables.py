@@ -41,7 +41,7 @@ ANTS_PLATFORM_HOST = "ANTS_PLATFORM_HOST"
 
 Host of Ants Platform API. Can be set via `ANTS_PLATFORM_HOST` environment variable.
 
-**Default value:** ``"https://cloud.ants-platform.com"``
+**Default value:** ``"https://api.agenticants.ai"``
 """
 
 ANTS_PLATFORM_DEBUG = "ANTS_PLATFORM_DEBUG"
