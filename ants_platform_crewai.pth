@@ -1,0 +1,1 @@
+import importlib.util; importlib.util.find_spec("ants_platform") and __import__("ants_platform._crewai_bootstrap")

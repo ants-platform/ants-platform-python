@@ -260,7 +260,11 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
         return attributes
 
     def _extract_agent_context_from_metadata(
-        self, metadata: Optional[Dict[str, Any]]
+        self,
+        metadata: Optional[Dict[str, Any]],
+        observation_type: Optional[str] = None,
+        span_name: Optional[str] = None,
+        parent_run_id: Optional[UUID] = None,
     ) -> Dict[str, Optional[str]]:
         """Extract agent_name from LangChain metadata.
 
@@ -275,12 +279,11 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
         """
         agent_context = {"agent_name": None}
 
-        if metadata is None:
-            return agent_context
-
         # Extract from explicit metadata
-        if "ants_platform_agent_name" in metadata and isinstance(
-            metadata["ants_platform_agent_name"], str
+        if (
+            metadata is not None
+            and "ants_platform_agent_name" in metadata
+            and isinstance(metadata["ants_platform_agent_name"], str)
         ):
             agent_context["agent_name"] = metadata["ants_platform_agent_name"]
 
@@ -288,6 +291,13 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
         if agent_context["agent_name"] is None and self._agent_stack:
             stack_context = self._get_current_agent_context()
             agent_context["agent_name"] = stack_context["agent_name"]
+
+        # Ants Platform requires an agent_name on every observation. Children inherit
+        # it from their parent, but a ROOT LangChain run (no parent) has nothing to
+        # inherit, so fall back to the run/span name there. Non-root runs are left as
+        # None so they inherit silently (setting one here would warn on every child).
+        if agent_context["agent_name"] is None and parent_run_id is None:
+            agent_context["agent_name"] = span_name or observation_type or "langchain"
 
         return agent_context
 
@@ -327,7 +337,7 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
 
             # Extract agent context for agent-type observations
             agent_context = self._extract_agent_context_from_metadata(
-                metadata, observation_type, span_name
+                metadata, observation_type, span_name, parent_run_id
             )
 
             span = self._get_parent_observation(parent_run_id).start_observation(
@@ -710,7 +720,7 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
 
             # Extract agent context
             agent_context = self._extract_agent_context_from_metadata(
-                metadata, observation_type, span_name
+                metadata, observation_type, span_name, parent_run_id
             )
 
             span = self._get_parent_observation(parent_run_id).start_observation(
@@ -752,7 +762,7 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
 
             # Extract agent context
             agent_context = self._extract_agent_context_from_metadata(
-                metadata, observation_type, span_name
+                metadata, observation_type, span_name, parent_run_id
             )
 
             span = self._get_parent_observation(parent_run_id).start_observation(
@@ -871,7 +881,7 @@ class LangchainCallbackHandler(LangchainBaseCallbackHandler):
 
             # Extract agent context
             agent_context = self._extract_agent_context_from_metadata(
-                metadata, "generation", span_name
+                metadata, "generation", span_name, parent_run_id
             )
 
             content = {
